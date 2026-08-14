@@ -23,6 +23,10 @@ serde_json = "1"
 # Decodifica o payload base64 dentro do cookie __session
 base64 = "0.22"
 
+# Decodifica respostas do ConstruCode que vêm em Windows-1252 (páginas ASP.NET
+# legadas) mesmo com reqwest sem a feature "charset".
+encoding_rs = "0.8"
+
 # Compara a data de expiração do token gravado em disco
 chrono = "0.4"
 

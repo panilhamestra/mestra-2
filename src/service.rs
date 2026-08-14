@@ -15,6 +15,13 @@ use crate::utils;
 const TOKEN_FILE_PATH: &str = "data/token.json";
 const EXPIRATION_FORMAT: &str = "%Y-%m-%dT%H:%M:%S";
 
+// ConstruCode (páginas ASP.NET legadas) responde em Windows-1252, mas o
+// reqwest tá sem a feature "charset" — sem isso, .text() faz UTF-8 lossy e
+// todo acento vira caractere de substituição/some. Decodifica manual.
+fn decode_windows_1252(bytes: &[u8]) -> String {
+    encoding_rs::WINDOWS_1252.decode(bytes).0.into_owned()
+}
+
 #[derive(Debug)]
 pub enum ServiceError {
     Request(reqwest::Error),
@@ -304,8 +311,9 @@ async fn fetch_projeto_page(state: &AppState, id_obra: u32) -> Result<ProjetoPag
         .header("Referer", format!("{}/", state.web_base_url))
         .send()
         .await?
-        .text()
+        .bytes()
         .await?;
+    let html = decode_windows_1252(&html);
 
     Ok(ProjetoPage {
         id_user: extract_id_user(&html)?,
@@ -461,7 +469,7 @@ pub async fn fetch_itens_disciplina(
         ("statusID", ""),
     ];
 
-    let text = state
+    let bytes = state
         .http_client
         .post(&state.plantas_url)
         .header("X-Requested-With", "XMLHttpRequest")
@@ -469,8 +477,9 @@ pub async fn fetch_itens_disciplina(
         .form(&params)
         .send()
         .await?
-        .text()
+        .bytes()
         .await?;
+    let text = decode_windows_1252(&bytes);
 
     let parsed: PlantasByAreaResponse =
         serde_json::from_str(&text).map_err(|e| ServiceError::UpstreamParse(e.to_string()))?;

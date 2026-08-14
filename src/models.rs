@@ -126,37 +126,37 @@ pub struct DisciplineItem {
     pub id: u32,
     #[serde(rename = "idPlantaPai", default)]
     pub id_planta_pai: Option<u32>,
-    #[serde(rename = "Descricao")]
+    #[serde(rename = "Descricao", default, deserialize_with = "null_as_default")]
     pub descricao: String,
     #[serde(rename = "Detalhamento")]
     pub detalhamento: Option<String>,
     #[serde(rename = "Obs")]
     pub obs: Option<String>,
-    #[serde(rename = "Revisao")]
+    #[serde(rename = "Revisao", default, deserialize_with = "null_as_default")]
     pub revisao: String,
-    #[serde(rename = "Usuario")]
+    #[serde(rename = "Usuario", default, deserialize_with = "null_as_default")]
     pub usuario: String,
-    #[serde(rename = "FileName")]
+    #[serde(rename = "FileName", default, deserialize_with = "null_as_default")]
     pub file_name: String,
     #[serde(rename = "FileSize", default, deserialize_with = "null_as_default")]
     pub file_size: u64,
-    #[serde(rename = "Extensao")]
+    #[serde(rename = "Extensao", default, deserialize_with = "null_as_default")]
     pub extensao: String,
-    #[serde(rename = "Extensoes")]
+    #[serde(rename = "Extensoes", default, deserialize_with = "null_as_default")]
     pub extensoes: Vec<String>,
-    #[serde(rename = "PathUrl")]
+    #[serde(rename = "PathUrl", default, deserialize_with = "null_as_default")]
     pub path_url: String,
-    #[serde(rename = "OriginalFileName")]
+    #[serde(rename = "OriginalFileName", default, deserialize_with = "null_as_default")]
     pub original_file_name: String,
-    #[serde(rename = "TituloCc")]
+    #[serde(rename = "TituloCc", default, deserialize_with = "null_as_default")]
     pub titulo_cc: String,
-    #[serde(rename = "OriginalFileId")]
+    #[serde(rename = "OriginalFileId", default, deserialize_with = "null_as_default")]
     pub original_file_id: String,
-    #[serde(rename = "Disciplina")]
+    #[serde(rename = "Disciplina", default, deserialize_with = "null_as_default")]
     pub disciplina: String,
-    #[serde(rename = "Sigla")]
+    #[serde(rename = "Sigla", default, deserialize_with = "null_as_default")]
     pub sigla: String,
-    #[serde(rename = "Cor")]
+    #[serde(rename = "Cor", default, deserialize_with = "null_as_default")]
     pub cor: String,
     #[serde(rename = "ManterRevisaoAtual", default, deserialize_with = "null_as_default")]
     pub manter_revisao_atual: bool,
@@ -172,7 +172,7 @@ pub struct DisciplineItem {
     pub is_cc: bool,
     #[serde(rename = "Novo", default, deserialize_with = "null_as_default")]
     pub novo: bool,
-    #[serde(rename = "ExtensoesCc")]
+    #[serde(rename = "ExtensoesCc", default, deserialize_with = "null_as_default")]
     pub extensoes_cc: Vec<String>,
     #[serde(rename = "IsOwner", default, deserialize_with = "null_as_default")]
     pub is_owner: bool,
@@ -180,9 +180,9 @@ pub struct DisciplineItem {
     pub is_atuante: bool,
     #[serde(rename = "PodeBaixarDisciplinasNaoAtuantes", default, deserialize_with = "null_as_default")]
     pub pode_baixar_disciplinas_nao_atuantes: bool,
-    #[serde(rename = "DataAtualizacao")]
+    #[serde(rename = "DataAtualizacao", default, deserialize_with = "null_as_default")]
     pub data_atualizacao: String,
-    #[serde(rename = "Formato")]
+    #[serde(rename = "Formato", default, deserialize_with = "null_as_default")]
     pub formato: String,
     #[serde(rename = "CanDeleteDocuments", default, deserialize_with = "null_as_default")]
     pub can_delete_documents: bool,
@@ -256,12 +256,12 @@ pub struct DisciplineItem {
     pub dwg_id: u32,
     #[serde(rename = "DWGFileSize", default, deserialize_with = "null_as_default")]
     pub dwg_file_size: u64,
-    #[serde(rename = "Emitente")]
+    #[serde(rename = "Emitente", default, deserialize_with = "null_as_default")]
     pub emitente: String,
     #[serde(rename = "IdUsuario", default, deserialize_with = "null_as_default")]
     pub id_usuario: u32,
-    #[serde(rename = "FotoAccount")]
+    #[serde(rename = "FotoAccount", default, deserialize_with = "null_as_default")]
     pub foto_account: String,
-    #[serde(rename = "DataLiberacao")]
+    #[serde(rename = "DataLiberacao", default, deserialize_with = "null_as_default")]
     pub data_liberacao: String,
 }
