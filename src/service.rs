@@ -127,13 +127,13 @@ async fn authenticate(state: &AppState, verification_token: &str) -> Result<Sess
         return Err(ServiceError::InvalidCredentials);
     }
 
-    extract_session_token(&state.cookie_jar)
+    extract_session_token(&state.cookie_jar, &state.web_base_url)
 }
 
-fn extract_session_token(jar: &Arc<Jar>) -> Result<SessionToken, ServiceError> {
-    let web_url: reqwest::Url = "https://web.construcode.com.br/"
+fn extract_session_token(jar: &Arc<Jar>, web_base_url: &str) -> Result<SessionToken, ServiceError> {
+    let web_url: reqwest::Url = web_base_url
         .parse()
-        .expect("URL fixa válida");
+        .map_err(|_| ServiceError::SessionCookieMissing)?;
 
     let cookie_header = jar.cookies(&web_url).ok_or(ServiceError::SessionCookieMissing)?;
     let cookie_str = cookie_header
@@ -253,7 +253,7 @@ pub async fn fetch_enterprises(state: &AppState) -> Result<Vec<Enterprise>, Serv
         .http_client
         .get(&state.enterprises_url)
         .header("Accept", "*/*")
-        .header("Referer", "https://web.construcode.com.br/Enterprises")
+        .header("Referer", format!("{}/Enterprises", state.web_base_url))
         .send()
         .await?
         .text()
@@ -301,7 +301,7 @@ async fn fetch_projeto_page(state: &AppState, id_obra: u32) -> Result<ProjetoPag
         .http_client
         .get(&state.projeto_url)
         .query(&[("id", id_obra.to_string())])
-        .header("Referer", "https://web.construcode.com.br/")
+        .header("Referer", format!("{}/", state.web_base_url))
         .send()
         .await?
         .text()
@@ -465,7 +465,7 @@ pub async fn fetch_itens_disciplina(
         .http_client
         .post(&state.plantas_url)
         .header("X-Requested-With", "XMLHttpRequest")
-        .header("Referer", format!("https://construcode.com.br/Projetos/Index?id={id_obra}"))
+        .header("Referer", format!("{}/Projetos/Index?id={id_obra}", state.base_url))
         .form(&params)
         .send()
         .await?

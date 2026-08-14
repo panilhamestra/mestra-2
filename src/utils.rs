@@ -2,11 +2,10 @@
 //!
 //! ===================== Turbo-stream decoder =====================
 //! Tudo abaixo (até o fim do arquivo) é o decoder do formato "turbo-stream"
-//! (Remix single-fetch) usado por
-//! https://web.construcode.com.br/Enterprises.data — a resposta não é JSON
-//! puro, é um array "achatado" onde cada elemento pode referenciar outros
-//! por índice. Porta 1:1 do decoder Python em docs/construcode_login.py.
-//! Ver https://github.com/jacob-ebey/turbo-stream
+//! (Remix single-fetch) usado pelo endpoint em CONSTRUCODE_ENTERPRISES_URL
+//! — a resposta não é JSON puro, é um array "achatado" onde cada elemento
+//! pode referenciar outros por índice.
+//! Ver https://github.com/jacob-ebey/turbo-stream (spec do formato, público).
 //! Ponto de entrada público: `turbo_stream_decode`.
 //! ==================================================================
 
