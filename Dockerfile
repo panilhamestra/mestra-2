@@ -1,4 +1,4 @@
-FROM rust:1.87-slim AS builder
+FROM rust:1.88-slim AS builder
 
 # curl: necessário pro build script do utoipa-swagger-ui baixar os assets do Swagger UI
 RUN apt-get update && apt-get install -y curl ca-certificates && rm -rf /var/lib/apt/lists/*

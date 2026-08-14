@@ -1,56 +1,485 @@
-use crate::models::{ApiItemRaw, OrganizedItem};
-use crate::state::AppState;
+use std::fmt;
+use std::sync::Arc;
 
-// Chegada
-async fn fetch_raw_items(state: &AppState) -> Result<Vec<ApiItemRaw>, reqwest::Error> {
-    state
+use axum::http::StatusCode;
+use base64::{engine::general_purpose::STANDARD, Engine};
+use chrono::{Local, NaiveDateTime};
+use reqwest::cookie::{CookieStore, Jar};
+use serde::Deserialize;
+use serde_json::Value;
+
+use crate::models::{Discipline, DisciplineItem, Enterprise, SessionToken, StoredToken};
+use crate::state::AppState;
+use crate::utils;
+
+const TOKEN_FILE_PATH: &str = "data/token.json";
+const EXPIRATION_FORMAT: &str = "%Y-%m-%dT%H:%M:%S";
+
+#[derive(Debug)]
+pub enum ServiceError {
+    Request(reqwest::Error),
+    VerificationTokenMissing,
+    InvalidCredentials,
+    SessionCookieMissing,
+    SessionCookieInvalid,
+    Persist(std::io::Error),
+    ProjetoPageInvalid,
+    DisciplinaNotFound(String),
+    UpstreamParse(String),
+}
+
+impl fmt::Display for ServiceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ServiceError::Request(e) => write!(f, "erro de rede falando com o ConstruCode: {e}"),
+            ServiceError::VerificationTokenMissing => {
+                write!(f, "não achei __RequestVerificationToken na página de login")
+            }
+            ServiceError::InvalidCredentials => {
+                write!(f, "login falhou — confira CONSTRUCODE_EMAIL/CONSTRUCODE_PASSWORD no .env")
+            }
+            ServiceError::SessionCookieMissing => {
+                write!(f, "login OK, mas não achei o cookie __session")
+            }
+            ServiceError::SessionCookieInvalid => {
+                write!(f, "cookie __session veio num formato inesperado")
+            }
+            ServiceError::Persist(e) => write!(f, "erro gravando o token em disco: {e}"),
+            ServiceError::ProjetoPageInvalid => {
+                write!(f, "não consegui ler a página do empreendimento no ConstruCode")
+            }
+            ServiceError::DisciplinaNotFound(sigla) => {
+                write!(f, "disciplina '{sigla}' não encontrada nesse empreendimento")
+            }
+            ServiceError::UpstreamParse(msg) => write!(f, "resposta inesperada do ConstruCode: {msg}"),
+        }
+    }
+}
+
+impl From<reqwest::Error> for ServiceError {
+    fn from(e: reqwest::Error) -> Self {
+        ServiceError::Request(e)
+    }
+}
+
+impl ServiceError {
+    pub fn status_code(&self) -> StatusCode {
+        match self {
+            ServiceError::InvalidCredentials => StatusCode::UNAUTHORIZED,
+            ServiceError::DisciplinaNotFound(_) => StatusCode::NOT_FOUND,
+            _ => StatusCode::BAD_GATEWAY,
+        }
+    }
+}
+
+// ===================== Login =====================
+
+// Chegada: pega o __RequestVerificationToken da página de login
+async fn fetch_verification_token(state: &AppState) -> Result<String, ServiceError> {
+    let html = state
         .http_client
-        .get(&state.api_url)
+        .get(&state.login_url)
         .send()
         .await?
-        .json::<Vec<ApiItemRaw>>()
-        .await
+        .text()
+        .await?;
+
+    extract_verification_token(&html)
 }
 
-// Operação
-fn calculate_estimated_revenue(price: f64, rating_count: u32) -> f64 {
-    price * rating_count as f64
+fn extract_verification_token(html: &str) -> Result<String, ServiceError> {
+    let marker = "name=\"__RequestVerificationToken\"";
+    let marker_pos = html.find(marker).ok_or(ServiceError::VerificationTokenMissing)?;
+    let tag_start = html[..marker_pos]
+        .rfind('<')
+        .ok_or(ServiceError::VerificationTokenMissing)?;
+    let tag_end = marker_pos
+        + html[marker_pos..]
+            .find('>')
+            .ok_or(ServiceError::VerificationTokenMissing)?;
+    let tag = &html[tag_start..tag_end];
+
+    let value_marker = "value=\"";
+    let value_start =
+        tag.find(value_marker).ok_or(ServiceError::VerificationTokenMissing)? + value_marker.len();
+    let value_end = value_start
+        + tag[value_start..]
+            .find('"')
+            .ok_or(ServiceError::VerificationTokenMissing)?;
+
+    Ok(tag[value_start..value_end].to_string())
 }
 
-// Partida
-fn organize_item(item: ApiItemRaw, estimated_revenue: f64) -> OrganizedItem {
-    OrganizedItem {
-        id: item.id,
-        name: item.title,
-        category: item.category,
-        price: item.price,
-        rating_count: item.rating.count,
-        estimated_revenue,
+// Operação: autentica e decodifica o cookie de sessão
+async fn authenticate(state: &AppState, verification_token: &str) -> Result<SessionToken, ServiceError> {
+    let response = state
+        .http_client
+        .post(&state.login_url)
+        .form(&[
+            ("__RequestVerificationToken", verification_token),
+            ("email", state.credentials.email.as_str()),
+            ("password", state.credentials.password.as_str()),
+        ])
+        .send()
+        .await?;
+
+    if response.url().as_str().trim_end_matches('/').ends_with("/Account/Login") {
+        return Err(ServiceError::InvalidCredentials);
     }
+
+    extract_session_token(&state.cookie_jar)
+}
+
+fn extract_session_token(jar: &Arc<Jar>) -> Result<SessionToken, ServiceError> {
+    let web_url: reqwest::Url = "https://web.construcode.com.br/"
+        .parse()
+        .expect("URL fixa válida");
+
+    let cookie_header = jar.cookies(&web_url).ok_or(ServiceError::SessionCookieMissing)?;
+    let cookie_str = cookie_header
+        .to_str()
+        .map_err(|_| ServiceError::SessionCookieMissing)?;
+
+    let raw_session = cookie_str
+        .split(';')
+        .map(str::trim)
+        .find_map(|kv| kv.strip_prefix("__session="))
+        .ok_or(ServiceError::SessionCookieMissing)?;
+
+    decode_session_cookie(raw_session)
+}
+
+fn decode_session_cookie(raw: &str) -> Result<SessionToken, ServiceError> {
+    let decoded = percent_decode(raw);
+    let payload_b64 = decoded.split('.').next().unwrap_or(&decoded);
+    let padded = pad_base64(payload_b64);
+
+    let bytes = STANDARD
+        .decode(padded)
+        .map_err(|_| ServiceError::SessionCookieInvalid)?;
+
+    serde_json::from_slice(&bytes).map_err(|_| ServiceError::SessionCookieInvalid)
+}
+
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(byte) = u8::from_str_radix(&input[i + 1..i + 3], 16) {
+                out.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn pad_base64(s: &str) -> String {
+    let remainder = s.len() % 4;
+    if remainder == 0 {
+        s.to_string()
+    } else {
+        format!("{s}{}", "=".repeat(4 - remainder))
+    }
+}
+
+// Partida: grava token + data de expiração em data/token.json
+async fn persist_token(session_token: &SessionToken) -> Result<(), ServiceError> {
+    let stored = StoredToken {
+        token: session_token.token.clone(),
+        expiration_date: session_token.expiration_date.clone(),
+    };
+    let json = serde_json::to_string_pretty(&stored).expect("StoredToken sempre serializa");
+
+    tokio::fs::create_dir_all("data").await.map_err(ServiceError::Persist)?;
+    tokio::fs::write(TOKEN_FILE_PATH, json)
+        .await
+        .map_err(ServiceError::Persist)?;
+
+    Ok(())
 }
 
 // Ciclo completo: Chegada -> Operação -> Partida
-pub async fn fetch_and_organize(state: &AppState) -> Result<Vec<OrganizedItem>, reqwest::Error> {
-    let raw_items = fetch_raw_items(state).await?;
+async fn login_and_persist_token(state: &AppState) -> Result<StoredToken, ServiceError> {
+    let verification_token = fetch_verification_token(state).await?;
+    let session_token = authenticate(state, &verification_token).await?;
+    persist_token(&session_token).await?;
 
-    let organized_items = raw_items
-        .into_iter()
-        .map(|item| {
-            let estimated_revenue = calculate_estimated_revenue(item.price, item.rating.count);
-            organize_item(item, estimated_revenue)
-        })
-        .collect();
-
-    Ok(organized_items)
+    Ok(StoredToken {
+        token: session_token.token,
+        expiration_date: session_token.expiration_date,
+    })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+// ===================== Validação/renovação do token =====================
 
-    #[test]
-    fn calculates_revenue_by_multiplying_price_and_rating_count() {
-        let result = calculate_estimated_revenue(10.0, 5);
-        assert_eq!(result, 50.0);
+// Lê data/token.json e devolve o token só se existir e ainda não tiver
+// expirado. Qualquer problema (arquivo ausente, corrompido, expirado) vira
+// None — quem chama decide o que fazer (aqui: logar de novo).
+async fn read_valid_stored_token() -> Option<StoredToken> {
+    let bytes = tokio::fs::read(TOKEN_FILE_PATH).await.ok()?;
+    let stored: StoredToken = serde_json::from_slice(&bytes).ok()?;
+    let expiration = NaiveDateTime::parse_from_str(&stored.expiration_date, EXPIRATION_FORMAT).ok()?;
+
+    // expirationDate do ConstruCode não tem timezone — assume o mesmo
+    // horário local do servidor que gerou o token (Brasil).
+    if Local::now().naive_local() >= expiration {
+        return None;
     }
+
+    Some(stored)
+}
+
+// Portão de entrada de todos os endpoints que dependem de sessão: usa o
+// token salvo se ainda for válido, senão loga de novo no ConstruCode e
+// grava o novo token — quem chamou nunca precisa se preocupar com login.
+pub async fn ensure_valid_token(state: &AppState) -> Result<StoredToken, ServiceError> {
+    if let Some(stored) = read_valid_stored_token().await {
+        return Ok(stored);
+    }
+
+    login_and_persist_token(state).await
+}
+
+// ===================== Empreendimentos =====================
+
+pub async fn fetch_enterprises(state: &AppState) -> Result<Vec<Enterprise>, ServiceError> {
+    let text = state
+        .http_client
+        .get(&state.enterprises_url)
+        .header("Accept", "*/*")
+        .header("Referer", "https://web.construcode.com.br/Enterprises")
+        .send()
+        .await?
+        .text()
+        .await?;
+
+    let decoded = utils::turbo_stream_decode(&text);
+
+    let page_data = decoded
+        .get("routes/_App.Enterprises")
+        .and_then(|v| v.get("data"))
+        .and_then(|v| v.get("pageData"))
+        .cloned()
+        .unwrap_or(Value::Null);
+
+    let my_enterprises: Vec<Enterprise> = page_data
+        .get("myEnterprises")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| ServiceError::UpstreamParse(e.to_string()))?
+        .unwrap_or_default();
+
+    let shared_enterprises: Vec<Enterprise> = page_data
+        .get("sharedEnterprises")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| ServiceError::UpstreamParse(e.to_string()))?
+        .unwrap_or_default();
+
+    let mut enterprises = my_enterprises;
+    enterprises.extend(shared_enterprises);
+    Ok(enterprises)
+}
+
+// ===================== Disciplinas / Itens =====================
+
+struct ProjetoPage {
+    id_user: String,
+    disciplinas: Vec<Discipline>,
+}
+
+async fn fetch_projeto_page(state: &AppState, id_obra: u32) -> Result<ProjetoPage, ServiceError> {
+    let html = state
+        .http_client
+        .get(&state.projeto_url)
+        .query(&[("id", id_obra.to_string())])
+        .header("Referer", "https://web.construcode.com.br/")
+        .send()
+        .await?
+        .text()
+        .await?;
+
+    Ok(ProjetoPage {
+        id_user: extract_id_user(&html)?,
+        disciplinas: extract_disciplinas(&html)?,
+    })
+}
+
+fn extract_id_user(html: &str) -> Result<String, ServiceError> {
+    let marker = "const idUser = '";
+    let start = html.find(marker).ok_or(ServiceError::ProjetoPageInvalid)? + marker.len();
+    let end = start + html[start..].find('\'').ok_or(ServiceError::ProjetoPageInvalid)?;
+    Ok(html[start..end].to_string())
+}
+
+fn extract_disciplinas(html: &str) -> Result<Vec<Discipline>, ServiceError> {
+    let marker_pos = html
+        .find("id=\"idDisciplina\"")
+        .ok_or(ServiceError::ProjetoPageInvalid)?;
+    let select_start = html[..marker_pos]
+        .rfind("<select")
+        .ok_or(ServiceError::ProjetoPageInvalid)?;
+    let select_end = select_start
+        + html[select_start..]
+            .find("</select>")
+            .ok_or(ServiceError::ProjetoPageInvalid)?;
+    let select_block = &html[select_start..select_end];
+
+    let mut disciplinas = Vec::new();
+    let mut rest = select_block;
+    let option_marker = "<option value=\"";
+
+    while let Some(opt_pos) = rest.find(option_marker) {
+        let after_marker = &rest[opt_pos + option_marker.len()..];
+        let Some(value_end) = after_marker.find('"') else { break };
+        let value_str = &after_marker[..value_end];
+
+        let after_value = &after_marker[value_end + 1..];
+        let Some(gt_pos) = after_value.find('>') else { break };
+        let after_gt = &after_value[gt_pos + 1..];
+        let Some(lt_pos) = after_gt.find('<') else { break };
+        let text = &after_gt[..lt_pos];
+
+        rest = &after_gt[lt_pos..];
+
+        if value_str != "-1" {
+            if let Ok(id) = value_str.parse::<u32>() {
+                let (sigla, name) = split_sigla_name(&decode_html_entities(text));
+                disciplinas.push(Discipline { id, sigla, name });
+            }
+        }
+    }
+
+    Ok(disciplinas)
+}
+
+// Texto da option vem como "(EST) Estrutura" — separa sigla e nome.
+fn split_sigla_name(text: &str) -> (String, String) {
+    if let Some(rest) = text.strip_prefix('(') {
+        if let Some(close) = rest.find(')') {
+            let sigla = rest[..close].to_string();
+            let name = rest[close + 1..].trim().to_string();
+            return (sigla, name);
+        }
+    }
+    (String::new(), text.to_string())
+}
+
+fn decode_html_entities(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    while i < input.len() {
+        if input.as_bytes()[i] == b'&' {
+            if let Some(semi_rel) = input[i..].find(';') {
+                let entity = &input[i + 1..i + semi_rel];
+                let decoded_char = if let Some(hex) = entity.strip_prefix("#x").or_else(|| entity.strip_prefix("#X")) {
+                    u32::from_str_radix(hex, 16).ok().and_then(char::from_u32)
+                } else if let Some(dec) = entity.strip_prefix('#') {
+                    dec.parse::<u32>().ok().and_then(char::from_u32)
+                } else {
+                    match entity {
+                        "amp" => Some('&'),
+                        "lt" => Some('<'),
+                        "gt" => Some('>'),
+                        "quot" => Some('"'),
+                        "apos" => Some('\''),
+                        _ => None,
+                    }
+                };
+                if let Some(c) = decoded_char {
+                    out.push(c);
+                    i += semi_rel + 1;
+                    continue;
+                }
+            }
+        }
+        let ch_len = input[i..].chars().next().map(char::len_utf8).unwrap_or(1);
+        out.push_str(&input[i..i + ch_len]);
+        i += ch_len;
+    }
+    out
+}
+
+pub async fn fetch_disciplinas(state: &AppState, id_obra: u32) -> Result<Vec<Discipline>, ServiceError> {
+    Ok(fetch_projeto_page(state, id_obra).await?.disciplinas)
+}
+
+#[derive(Debug, Deserialize)]
+struct PlantasByAreaResponse {
+    #[serde(rename = "Success")]
+    success: bool,
+    #[serde(rename = "JsonObject")]
+    json_object: Option<PlantasJsonObject>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PlantasJsonObject {
+    #[serde(rename = "Documentos")]
+    documentos: Option<Vec<DisciplineItem>>,
+}
+
+pub async fn fetch_itens_disciplina(
+    state: &AppState,
+    id_obra: u32,
+    sigla: &str,
+) -> Result<Vec<DisciplineItem>, ServiceError> {
+    let page = fetch_projeto_page(state, id_obra).await?;
+
+    let disciplina = page
+        .disciplinas
+        .iter()
+        .find(|d| d.sigla.eq_ignore_ascii_case(sigla))
+        .ok_or_else(|| ServiceError::DisciplinaNotFound(sigla.to_string()))?;
+
+    let id_obra_str = id_obra.to_string();
+    let disciplina_id_str = disciplina.id.to_string();
+
+    let params = [
+        ("idArea", "-1"),
+        ("idObra", id_obra_str.as_str()),
+        ("ordenacao", "4"),
+        ("hdnExtensoes", ""),
+        ("U", page.id_user.as_str()),
+        ("exibirDocsSemArea", "false"),
+        ("exibirTodosOsDocumentos", "false"),
+        ("planta", ""),
+        ("exibirAreas", "false"),
+        ("idDisciplina", disciplina_id_str.as_str()),
+        ("disciplinaID", disciplina_id_str.as_str()),
+        ("faseID", ""),
+        ("dt", ""),
+        ("dtF", ""),
+        ("filtroSituacao", ""),
+        ("statusID", ""),
+    ];
+
+    let text = state
+        .http_client
+        .post(&state.plantas_url)
+        .header("X-Requested-With", "XMLHttpRequest")
+        .header("Referer", format!("https://construcode.com.br/Projetos/Index?id={id_obra}"))
+        .form(&params)
+        .send()
+        .await?
+        .text()
+        .await?;
+
+    let parsed: PlantasByAreaResponse =
+        serde_json::from_str(&text).map_err(|e| ServiceError::UpstreamParse(e.to_string()))?;
+
+    if !parsed.success {
+        return Err(ServiceError::UpstreamParse(
+            "PostPlantasByArea retornou Success=false".to_string(),
+        ));
+    }
+
+    Ok(parsed.json_object.and_then(|obj| obj.documentos).unwrap_or_default())
 }

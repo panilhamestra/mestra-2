@@ -1,3 +1,7 @@
 /target
 .claude
 #.env
+
+# token de sessão gravado pelo endpoint /login — contém segredo, não commitar
+/data/*
+!/data/.gitkeep
