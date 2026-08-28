@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
@@ -8,7 +9,7 @@ use reqwest::cookie::{CookieStore, Jar};
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::models::{Discipline, DisciplineItem, Enterprise, SessionToken, StoredToken};
+use crate::models::{ArquivoUpload, Discipline, DisciplineItem, Enterprise, NovoItemInput, SessionToken, StoredToken};
 use crate::state::AppState;
 use crate::utils;
 
@@ -22,6 +23,32 @@ fn decode_windows_1252(bytes: &[u8]) -> String {
     encoding_rs::WINDOWS_1252.decode(bytes).0.into_owned()
 }
 
+// Mesma razão do decode acima, na direção oposta: o ConstruCode lê o body
+// de x-www-form-urlencoded como Windows-1252, mas reqwest::form() serializa
+// em UTF-8. Sem isso, "Ç" (UTF-8 C3 87) chega no servidor e vira "Ã‡"
+// (cada byte UTF-8 relido como um char Windows-1252). Monta o body na mão,
+// codificando cada campo em Windows-1252 antes do percent-encoding.
+fn encode_form_windows_1252(params: &[(String, String)]) -> String {
+    params
+        .iter()
+        .map(|(k, v)| format!("{}={}", percent_encode_windows_1252(k), percent_encode_windows_1252(v)))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+fn percent_encode_windows_1252(s: &str) -> String {
+    let (bytes, _, _) = encoding_rs::WINDOWS_1252.encode(s);
+    let mut out = String::with_capacity(bytes.len());
+    for &b in bytes.iter() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 #[derive(Debug)]
 pub enum ServiceError {
     Request(reqwest::Error),
@@ -33,6 +60,8 @@ pub enum ServiceError {
     ProjetoPageInvalid,
     DisciplinaNotFound(String),
     UpstreamParse(String),
+    UploadFailed(String),
+    CreateFailed(String),
 }
 
 impl fmt::Display for ServiceError {
@@ -59,6 +88,8 @@ impl fmt::Display for ServiceError {
                 write!(f, "disciplina '{sigla}' não encontrada nesse empreendimento")
             }
             ServiceError::UpstreamParse(msg) => write!(f, "resposta inesperada do ConstruCode: {msg}"),
+            ServiceError::UploadFailed(msg) => write!(f, "falha no upload do arquivo no ConstruCode: {msg}"),
+            ServiceError::CreateFailed(msg) => write!(f, "falha ao cadastrar o item no ConstruCode: {msg}"),
         }
     }
 }
@@ -491,4 +522,181 @@ pub async fn fetch_itens_disciplina(
     }
 
     Ok(parsed.json_object.and_then(|obj| obj.documentos).unwrap_or_default())
+}
+
+// ===================== Criação de item =====================
+
+#[derive(Debug, Deserialize)]
+struct UploadMultipleResponse {
+    #[serde(rename = "Success")]
+    success: bool,
+    #[serde(rename = "Projetos", default)]
+    projetos: HashMap<String, UploadedProjeto>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UploadedProjeto {
+    #[serde(rename = "FileName")]
+    file_name: String,
+    #[serde(rename = "Success")]
+    success: bool,
+    #[serde(rename = "Message")]
+    message: Option<String>,
+    // Revisao vem pronta do ConstruCode; Descricao (nome do item) já chega
+    // preenchida em NovoItemInput::nome, não é derivada daqui.
+    #[serde(rename = "Revisao", default)]
+    revisao: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct BatchCreateResponse {
+    #[serde(rename = "Success")]
+    success: bool,
+    #[serde(rename = "Message")]
+    message: Option<String>,
+}
+
+struct ArquivoResolvido<'a> {
+    arquivo: &'a ArquivoUpload,
+    file_name: String,
+    revisao: String,
+    descricao: String,
+}
+
+// Sobe todos os arquivos de uma vez (mesmo request multipart do ConstruCode,
+// campos file[0], file[1]... — é o que o uploader Dropzone da tela usa com
+// uploadMultiple:true). Devolve FileName/Revisao por OriginalFileName.
+async fn upload_files(
+    state: &AppState,
+    id_obra: u32,
+    arquivos: &[ArquivoUpload],
+) -> Result<HashMap<String, UploadedProjeto>, ServiceError> {
+    let mut form = reqwest::multipart::Form::new();
+    for (i, arquivo) in arquivos.iter().enumerate() {
+        let part = reqwest::multipart::Part::bytes(arquivo.bytes.clone()).file_name(arquivo.original_file_name.clone());
+        form = form.part(format!("file[{i}]"), part);
+    }
+
+    let bytes = state
+        .http_client
+        .post(&state.upload_url)
+        .query(&[("idObra", id_obra.to_string())])
+        .header("X-Requested-With", "XMLHttpRequest")
+        .header("Referer", format!("{}/Plantas/BatchCreate?idObra={id_obra}", state.base_url))
+        .multipart(form)
+        .send()
+        .await?
+        .bytes()
+        .await?;
+    let text = decode_windows_1252(&bytes);
+
+    let parsed: UploadMultipleResponse =
+        serde_json::from_str(&text).map_err(|e| ServiceError::UpstreamParse(e.to_string()))?;
+
+    if !parsed.success {
+        return Err(ServiceError::UploadFailed("UploadMultiple retornou Success=false".to_string()));
+    }
+
+    for (original_name, projeto) in &parsed.projetos {
+        if !projeto.success {
+            let msg = projeto.message.clone().unwrap_or_default();
+            return Err(ServiceError::UploadFailed(format!("'{original_name}': {msg}")));
+        }
+    }
+
+    Ok(parsed.projetos)
+}
+
+// Cadastra os itens já enviados (upload_files) — id_tipo é o id da
+// disciplina resolvido em criar_item_disciplina (mesmo namespace de
+// idDisciplina usado no GET: confirmado comparando os <select> das páginas
+// Projetos/Index e Plantas/BatchCreate, valores idênticos pra mesma sigla).
+async fn batch_create(
+    state: &AppState,
+    id_obra: u32,
+    id_area: i64,
+    id_tipo: u32,
+    input: &NovoItemInput,
+    resolvidos: &[ArquivoResolvido<'_>],
+) -> Result<(), ServiceError> {
+    let mut params: Vec<(String, String)> = vec![
+        ("idObra".to_string(), id_obra.to_string()),
+        ("idArea".to_string(), id_area.to_string()),
+    ];
+
+    for (i, item) in resolvidos.iter().enumerate() {
+        let prefix = format!("Plantas[{i}]");
+        params.push((format!("{prefix}.OriginalFileName"), item.arquivo.original_file_name.clone()));
+        params.push((format!("{prefix}.FileName"), item.file_name.clone()));
+        params.push((format!("{prefix}.ID"), "-1".to_string()));
+        params.push((format!("{prefix}.VincularComoHistorico"), input.vincular_como_historico.to_string()));
+        params.push((format!("{prefix}.filesize"), item.arquivo.bytes.len().to_string()));
+        params.push((format!("{prefix}.selectAreas"), String::new()));
+        params.push((format!("{prefix}.Formato"), input.formato.clone()));
+        params.push((format!("{prefix}.IDTipo"), id_tipo.to_string()));
+        params.push((format!("{prefix}.Descricao"), item.descricao.clone()));
+        params.push((format!("{prefix}.Revisao"), item.revisao.clone()));
+        params.push((format!("{prefix}.Prancha"), input.prancha.clone().unwrap_or_default()));
+        params.push((format!("{prefix}.Detalhamento"), input.detalhamento.clone().unwrap_or_default()));
+        params.push((format!("{prefix}.Obs"), input.obs.clone().unwrap_or_default()));
+        params.push((format!("{prefix}.Fase"), input.fase.to_string()));
+        params.push((format!("{prefix}.Liberado"), input.liberado.to_string()));
+    }
+
+    let bytes = state
+        .http_client
+        .post(&state.batch_create_url)
+        .header("X-Requested-With", "XMLHttpRequest")
+        .header("Referer", format!("{}/Plantas/BatchCreate?idObra={id_obra}", state.base_url))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(encode_form_windows_1252(&params))
+        .send()
+        .await?
+        .bytes()
+        .await?;
+    let text = decode_windows_1252(&bytes);
+
+    let parsed: BatchCreateResponse =
+        serde_json::from_str(&text).map_err(|e| ServiceError::UpstreamParse(e.to_string()))?;
+
+    if !parsed.success {
+        return Err(ServiceError::CreateFailed(
+            parsed.message.unwrap_or_else(|| "BatchCreate retornou Success=false".to_string()),
+        ));
+    }
+
+    Ok(())
+}
+
+// Ciclo completo: resolve a disciplina (sigla -> id, mesmo id usado como
+// IDTipo no BatchCreate) -> sobe os arquivos -> cadastra o item.
+pub async fn criar_item_disciplina(
+    state: &AppState,
+    id_obra: u32,
+    sigla: &str,
+    input: NovoItemInput,
+) -> Result<(), ServiceError> {
+    let page = fetch_projeto_page(state, id_obra).await?;
+    let disciplina = page
+        .disciplinas
+        .iter()
+        .find(|d| d.sigla.eq_ignore_ascii_case(sigla))
+        .ok_or_else(|| ServiceError::DisciplinaNotFound(sigla.to_string()))?;
+
+    let uploads = upload_files(state, id_obra, &input.arquivos).await?;
+
+    let mut resolvidos = Vec::with_capacity(input.arquivos.len());
+    for arquivo in &input.arquivos {
+        let projeto = uploads.get(&arquivo.original_file_name).ok_or_else(|| {
+            ServiceError::UploadFailed(format!("upload não devolveu dados para '{}'", arquivo.original_file_name))
+        })?;
+        resolvidos.push(ArquivoResolvido {
+            arquivo,
+            file_name: projeto.file_name.clone(),
+            revisao: projeto.revisao.clone(),
+            descricao: input.nome.clone(),
+        });
+    }
+
+    batch_create(state, id_obra, input.id_area, disciplina.id, &input, &resolvidos).await
 }

@@ -18,6 +18,8 @@ pub struct AppState {
     pub enterprises_url: String,
     pub projeto_url: String,
     pub plantas_url: String,
+    pub upload_url: String,
+    pub batch_create_url: String,
 
     // Domínios base do ConstruCode — usados só pra montar o header Referer
     // e resolver o cookie de sessão no jar. Ficam em env pra não hardcodar
@@ -40,6 +42,8 @@ impl AppState {
         let enterprises_url = required_env("CONSTRUCODE_ENTERPRISES_URL");
         let projeto_url = required_env("CONSTRUCODE_PROJETO_URL");
         let plantas_url = required_env("CONSTRUCODE_PLANTAS_URL");
+        let upload_url = required_env("CONSTRUCODE_UPLOAD_URL");
+        let batch_create_url = required_env("CONSTRUCODE_BATCH_CREATE_URL");
         let web_base_url = required_env("CONSTRUCODE_WEB_BASE_URL");
         let base_url = required_env("CONSTRUCODE_BASE_URL");
 
@@ -71,6 +75,8 @@ impl AppState {
             enterprises_url,
             projeto_url,
             plantas_url,
+            upload_url,
+            batch_create_url,
             web_base_url,
             base_url,
             credentials,

@@ -265,3 +265,49 @@ pub struct DisciplineItem {
     #[serde(rename = "DataLiberacao", default, deserialize_with = "null_as_default")]
     pub data_liberacao: String,
 }
+
+// ===== Criação de item (documento/planta) =====
+
+// Um arquivo recebido no multipart do endpoint de criação. Revisao NÃO vem
+// daqui — vem pronta da resposta do UploadMultiple. Descricao (campo
+// `nome` de NovoItemInput) também não: quem chama o endpoint decide.
+#[derive(Debug, Clone)]
+pub struct ArquivoUpload {
+    pub original_file_name: String,
+    pub bytes: Vec<u8>,
+}
+
+// Formulário do endpoint de criação já parseado do multipart, pronto pro
+// service usar. idArea/formato/vincular_como_historico têm default aplicado
+// na hora do parse (routes.rs) quando o cliente não manda.
+#[derive(Debug, Clone)]
+pub struct NovoItemInput {
+    pub id_area: i64,
+    pub nome: String,
+    pub detalhamento: Option<String>,
+    pub obs: Option<String>,
+    pub prancha: Option<String>,
+    pub fase: u32,
+    pub liberado: u32,
+    pub formato: String,
+    pub vincular_como_historico: bool,
+    pub arquivos: Vec<ArquivoUpload>,
+}
+
+// Só pra documentação OpenAPI/Swagger do endpoint multipart — o parse real
+// é manual em routes.rs (axum::extract::Multipart não dá pra derivar de
+// struct diretamente).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct NovoItemMultipart {
+    pub id_area: Option<i64>,
+    pub nome: String,
+    pub detalhamento: Option<String>,
+    pub obs: Option<String>,
+    pub prancha: Option<String>,
+    pub fase: u32,
+    pub liberado: u32,
+    pub formato: Option<String>,
+    pub vincular_como_historico: Option<bool>,
+    #[schema(value_type = Vec<String>, format = Binary)]
+    pub arquivos: Vec<Vec<u8>>,
+}
