@@ -13,7 +13,7 @@ use crate::state::AppState;
 
 // Usage tracking (telemetry) sent to HubCetec — same values as the Office
 // Script "Lista Mestra - OrganizadorTabajara".
-const USAGE_API_URL: &str = "https://hubcetec.com/api/v1/plugins/use/create/";
+const USAGE_API_URL: &str = "http://hubcetec.com/api/v1/plugins/use/create/";
 const USAGE_TITLE: &str = "Lista Mestra - OrganizadorTabajara - Hackathon26";
 const SCRIPT_VERSION: &str = "1.0";
 const USAGE_PARAMETER: u32 = 1;
