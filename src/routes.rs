@@ -16,6 +16,7 @@ use crate::service::{
     criar_item_disciplina, ensure_valid_token, fetch_disciplinas, fetch_enterprises, fetch_itens_disciplina, ServiceError,
 };
 use crate::state::AppState;
+use crate::usage::track_usage;
 
 #[derive(OpenApi)]
 #[openapi(
@@ -42,6 +43,10 @@ impl Modify for SecurityAddon {
                 "api_key",
                 SecurityScheme::ApiKey(ApiKey::Header(ApiKeyValue::new("X-Api-Token"))),
             );
+            components.add_security_scheme(
+                "user_email",
+                SecurityScheme::ApiKey(ApiKey::Header(ApiKeyValue::new("X-User-Email"))),
+            );
         }
     }
 }
@@ -55,6 +60,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/empreendimentos/:id/disciplinas/:sigla/itens",
             get(itens_disciplina_handler).post(criar_item_handler),
         )
+        // Inner layer: only requests with a valid token reach it and get tracked.
+        .route_layer(middleware::from_fn_with_state(Arc::clone(&state), track_usage))
         .route_layer(middleware::from_fn_with_state(Arc::clone(&state), require_api_token));
 
     Router::new()
@@ -88,9 +95,10 @@ fn map_service_error(e: ServiceError) -> (StatusCode, String) {
 #[utoipa::path(
     get,
     path = "/empreendimentos",
-    security(("api_key" = [])),
+    security(("api_key" = [], "user_email" = [])),
     responses(
         (status = 200, description = "Lista de empreendimentos do usuário logado", body = Vec<Enterprise>),
+        (status = 400, description = "X-User-Email ausente"),
         (status = 401, description = "X-Api-Token ausente/inválido"),
         (status = 502, description = "Falha ao buscar empreendimentos no ConstruCode")
     )
@@ -108,9 +116,10 @@ async fn empreendimentos_handler(
     get,
     path = "/empreendimentos/{id}/disciplinas",
     params(("id" = u32, Path, description = "Id do empreendimento")),
-    security(("api_key" = [])),
+    security(("api_key" = [], "user_email" = [])),
     responses(
         (status = 200, description = "Disciplinas do empreendimento", body = Vec<Discipline>),
+        (status = 400, description = "X-User-Email ausente"),
         (status = 401, description = "X-Api-Token ausente/inválido"),
         (status = 502, description = "Falha ao buscar disciplinas no ConstruCode")
     )
@@ -132,9 +141,10 @@ async fn disciplinas_handler(
         ("id" = u32, Path, description = "Id do empreendimento"),
         ("sigla" = String, Path, description = "Sigla da disciplina, ex: EST")
     ),
-    security(("api_key" = [])),
+    security(("api_key" = [], "user_email" = [])),
     responses(
         (status = 200, description = "Itens (documentos) da disciplina", body = Vec<DisciplineItem>),
+        (status = 400, description = "X-User-Email ausente"),
         (status = 401, description = "X-Api-Token ausente/inválido"),
         (status = 404, description = "Disciplina não encontrada nesse empreendimento"),
         (status = 502, description = "Falha ao buscar itens no ConstruCode")
@@ -160,10 +170,11 @@ async fn itens_disciplina_handler(
         ("sigla" = String, Path, description = "Sigla da disciplina, ex: EST")
     ),
     request_body(content = NovoItemMultipart, content_type = "multipart/form-data"),
-    security(("api_key" = [])),
+    security(("api_key" = [], "user_email" = [])),
     responses(
         (status = 201, description = "Item(ns) cadastrado(s) com sucesso"),
         (status = 400, description = "Campos obrigatórios ausentes, multipart inválido ou nenhum arquivo enviado"),
+        (status = 400, description = "X-User-Email ausente"),
         (status = 401, description = "X-Api-Token ausente/inválido"),
         (status = 404, description = "Disciplina não encontrada nesse empreendimento"),
         (status = 502, description = "Falha ao subir arquivo ou cadastrar item no ConstruCode")

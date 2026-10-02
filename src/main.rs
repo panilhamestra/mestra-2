@@ -2,6 +2,7 @@ mod models;
 mod routes;
 mod service;
 mod state;
+mod usage;
 mod utils;
 
 use std::sync::Arc;

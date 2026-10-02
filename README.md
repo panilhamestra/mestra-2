@@ -38,10 +38,10 @@ docker compose down
 
 ## Autenticação
 
-Toda rota de dados exige o header `X-Api-Token` com o valor de `API_ACCESS_TOKEN` do `.env`. Sem o header (ou com valor errado), a resposta é `401`.
+Toda rota de dados exige o header `X-Api-Token` com o valor de `API_ACCESS_TOKEN` do `.env`. Sem o header (ou com valor errado), a resposta é `401`. Também exigem o header `X-User-Email` (e-mail do usuário, registrado no usage tracking do HubCetec); sem ele, a resposta é `400`. `/health` não exige nenhum dos dois.
 
 ```powershell
-curl http://localhost:3000/empreendimentos -H "X-Api-Token: SEU_TOKEN_AQUI"
+curl http://localhost:3000/empreendimentos -H "X-Api-Token: SEU_TOKEN_AQUI" -H "X-User-Email: voce@empresa.com"
 ```
 
 Login no ConstruCode é automático: o primeiro request que precisar de sessão loga sozinho e persiste o token; requests seguintes reaproveitam até expirar.
@@ -56,9 +56,9 @@ Login no ConstruCode é automático: o primeiro request que precisar de sessão 
 | `GET` | `/health` | Healthcheck, sem autenticação. |
 
 ```powershell
-curl http://localhost:3000/empreendimentos -H "X-Api-Token: SEU_TOKEN_AQUI"
-curl http://localhost:3000/empreendimentos/5963/disciplinas -H "X-Api-Token: SEU_TOKEN_AQUI"
-curl http://localhost:3000/empreendimentos/5963/disciplinas/EST/itens -H "X-Api-Token: SEU_TOKEN_AQUI"
+curl http://localhost:3000/empreendimentos -H "X-Api-Token: SEU_TOKEN_AQUI" -H "X-User-Email: voce@empresa.com"
+curl http://localhost:3000/empreendimentos/5963/disciplinas -H "X-Api-Token: SEU_TOKEN_AQUI" -H "X-User-Email: voce@empresa.com"
+curl http://localhost:3000/empreendimentos/5963/disciplinas/EST/itens -H "X-Api-Token: SEU_TOKEN_AQUI" -H "X-User-Email: voce@empresa.com"
 curl http://localhost:3000/health
 ```
 
